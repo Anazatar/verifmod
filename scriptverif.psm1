@@ -1,4 +1,4 @@
-﻿function Instalar-ModuloSPO {
+function Instalar-ModuloSPO {
     try {
         if (-not (Get-Module -ListAvailable -Name Microsoft.Online.SharePoint.PowerShell)) {
             Install-Module Microsoft.Online.SharePoint.PowerShell -Scope CurrentUser -Force
@@ -54,24 +54,24 @@ function Verificar-LimitacoesTenant {
             }
         }
 
-        # Renomeação em andamento
-        $status = Get-SPOTenantRenameStatus
-        if ($status) {
+            $status = Get-SPOTenantRenameStatus
+        if ($status -and $status.State -eq "InProgress") {
             $agendamento = $status.'Requested at'
             $relatorioAplicaveis.Value += [PSCustomObject]@{
                 Aplicativo     = "Renomeação em Andamento"
-                Limitacao      = "Renomeação já em andamento"
+                Limitacao      = "Renomeação já está em andamento"
                 AcaoNecessaria = "Aguardar conclusão"
                 Impacto        = "Alto"
             }
-        } else {
+    } else {
             $relatorioNaoAplicaveis.Value += [PSCustomObject]@{
                 Aplicativo     = "Renomeação em Andamento"
                 Limitacao      = "Nenhuma renomeação ativa"
                 AcaoNecessaria = "Pode prosseguir"
                 Impacto        = "N/A"
-            }
         }
+    }
+
 
         # Sites ativos
         $sitos = Get-SPOSite -Limit ALL | Select-Object Url, Owner

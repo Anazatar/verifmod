@@ -1,16 +1,3 @@
-function Instalar-ModuloSPO {
-    try {
-        if (-not (Get-Module -ListAvailable -Name Microsoft.Online.SharePoint.PowerShell)) {
-            Install-Module Microsoft.Online.SharePoint.PowerShell -Scope CurrentUser -Force
-        }
-        Import-Module Microsoft.Online.SharePoint.PowerShell -Force
-    }
-    catch {
-        Write-Host "Erro ao instalar ou importar módulo Microsoft.Online.SharePoint.PowerShell" -ForegroundColor Red
-        Write-Host "Detalhes: $($_.Exception.Message)" -ForegroundColor DarkRed
-        throw
-    }
-}
 
 function Conectar-SharePoint {
     param([string]$adminUrl)
@@ -121,7 +108,6 @@ function Verificar-LimitacoesTenant {
             @{ Aplicativo = "Pesquisa SharePoint"; Limitacao = "Indexação pode demorar"; AcaoNecessaria = "Aguardar"; Impacto = "Baixo" }
         ) | ForEach-Object { [PSCustomObject]$_ }
 
-        Disconnect-SPOService
     } catch {
         Write-Host "Erro ao coletar dados do tenant: $($_.Exception.Message)" -ForegroundColor Red
     }
@@ -187,6 +173,44 @@ function Verificar-OneDriveSync {
     }
 }
 
+
+#Aplicativos Personalizados de Terceiros
+function Verificar-Redirect308 {
+    param (
+        [string]$url,
+        [ref]$relatorioAplicaveis,
+        [ref]$relatorioNaoAplicaveis
+    )
+
+    try {
+        Invoke-WebRequest -Uri $url -MaximumRedirection 0 -ErrorAction Stop | Out-Null
+        # Se não lançar exceção, então não houve redirect
+        $relatorioNaoAplicaveis.Value += [PSCustomObject]@{
+            Aplicativo     = "HTTP Redirect"
+            Limitacao      = "Sem redirecionamento HTTP 308 detectado"
+            AcaoNecessaria = "Nenhuma"
+            Impacto        = "N/A"
+        }
+    } catch {
+        if ($_.Exception.Response.StatusCode.value__ -eq 308) {
+            $relatorioAplicaveis.Value += [PSCustomObject]@{
+                Aplicativo     = "HTTP Redirect"
+                Limitacao      = "Resposta HTTP 308 detectada"
+                AcaoNecessaria = "Garantir suporte a 308 nos aplicativos"
+                Impacto        = "Médio"
+            }
+        } else {
+            $relatorioAplicaveis.Value += [PSCustomObject]@{
+                Aplicativo     = "HTTP Redirect"
+                Limitacao      = "Erro HTTP inesperado: $($_.Exception.Response.StatusCode)"
+                AcaoNecessaria = "Edite aplicativos personalizados para garantir que eles manipulem corretamente as respostas HTTP 308."
+                Impacto        = "Médio"
+            }
+        }
+    }
+}
+
+
 function Verificar-OneNote {
     param([ref]$relatorioAplicaveis, [ref]$relatorioNaoAplicaveis)
 
@@ -224,6 +248,365 @@ function Verificar-OneNote {
         Impacto        = "Baixo"
     }
 }
+
+function Verificar-Delve {
+    param([ref]$relatorioAplicaveis)
+
+    $relatorioAplicaveis.Value += [PSCustomObject]@{
+        Aplicativo     = "Delve"
+        Limitacao      = "Pode levar 24h para exibir perfis de pessoas após a renomeação"
+        AcaoNecessaria = "Nenhuma"
+        Impacto        = "Médio"
+    }
+}
+
+
+function Verificar-eDiscovery {
+    param([ref]$relatorioAplicaveis)
+
+    $relatorioAplicaveis.Value += [PSCustomObject]@{
+        Aplicativo     = "Descoberta Eletrônica (eDiscovery)"
+        Limitacao      = "Retenções não podem ser removidas até atualizar URLs"
+        AcaoNecessaria = "Atualizar as URLs de retenção no portal do Microsoft Purview"
+        Impacto        = "Médio"
+    }
+}
+
+function Buscar-FormulariosInfoPathGraph {
+    param (
+        [string]$tenant,
+        [ref]$relatorioAplicaveis,
+        [ref]$relatorioNaoAplicaveis
+    )
+
+    try {
+        $site = Get-MgSite -SiteId "root" -ErrorAction Stop
+
+        if (-not $site.Id) {
+            Write-Host "Erro: site raiz não retornou ID válido." -ForegroundColor Red
+            return
+        }
+
+        Write-Host "Site raiz carregado: $($site.WebUrl)" -ForegroundColor Green
+
+        $drives = Get-MgSiteDrive -SiteId $site.Id -ErrorAction Stop
+
+        if (-not $drives) {
+            Write-Host "Nenhum drive encontrado." -ForegroundColor Yellow
+            return
+        }
+
+        foreach ($drive in $drives) {
+            if (-not $drive.Id) {
+                Write-Host "Drive sem ID detectado. Ignorando..." -ForegroundColor Yellow
+                continue
+            }
+
+            Write-Host "Verificando arquivos .xsn no drive: $($drive.Name)" -ForegroundColor Cyan
+
+            try {
+                $itens = Get-MgDriveRootChild -DriveId $drive.Id -ErrorAction Stop
+                $formularios = $itens | Where-Object { $_.Name -like "*.xsn" }
+
+                if (-not $formularios) {
+                    $relatorioNaoAplicaveis.Value += [PSCustomObject]@{
+                        Aplicativo     = "Formulário InfoPath ($($drive.Name))"
+                        Limitacao      = "Nenhum arquivo .xsn encontrado"
+                        AcaoNecessaria = "Nenhuma"
+                        Impacto        = "N/A"
+                    }
+                }
+
+                foreach ($form in $formularios) {
+                    $relatorioAplicaveis.Value += [PSCustomObject]@{
+                        Aplicativo     = "Formulário InfoPath ($($drive.Name))"
+                        Limitacao      = "Arquivo .xsn localizado: $($form.Name)"
+                        AcaoNecessaria = "Reconectar o formulário InfoPath ao novo domínio após a renomeação"
+                        Impacto        = "Médio"
+                    }
+                    Write-Host "InfoPath encontrado: $($form.Name)" -ForegroundColor Yellow
+                }
+
+            } catch {
+                Write-Host "Erro ao acessar arquivos no drive $($drive.Name): $($_.Exception.Message)" -ForegroundColor Red
+            }
+        }
+
+    } catch {
+        Write-Host "Erro geral ao acessar o Graph: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
+function Verificar-Loop {
+    param([ref]$relatorioAplicaveis)
+
+    $relatorioAplicaveis.Value += [PSCustomObject]@{
+        Aplicativo     = "Microsoft Loop"
+        Limitacao      = "Áreas de trabalho existentes não podem ser partilhadas ou modificadas"
+        AcaoNecessaria = "Não existe nenhuma ação disponível"
+        Impacto        = "Médio"
+    }
+}
+
+function Verificar-SitesArquivados {
+    param (
+        [ref]$relatorioAplicaveis,
+        [ref]$relatorioNaoAplicaveis
+    )
+
+    try {
+        $sites = Get-SPOSite -Limit All | Where-Object { $_.LockState -eq "ReadOnly" }
+
+        if ($sites.Count -gt 0) {
+            $relatorioAplicaveis.Value += [PSCustomObject]@{
+                Aplicativo     = "Arquivo do Microsoft 365"
+                Limitacao      = "Detectado site(s) com LockState 'ReadOnly' (possivelmente arquivados)"
+                AcaoNecessaria = "Reativar os sites antes da renomeação e evitar arquivar durante o processo"
+                Impacto        = "Médio"
+            }
+
+            foreach ($site in $sites) {
+                Write-Host "Site arquivado detectado: $($site.Url)" -ForegroundColor Yellow
+            }
+        } else {
+            $relatorioNaoAplicaveis.Value += [PSCustomObject]@{
+                Aplicativo     = "Arquivo do Microsoft 365"
+                Limitacao      = "Nenhum site arquivado encontrado"
+                AcaoNecessaria = "Nenhuma ação"
+                Impacto        = "N/A"
+            }
+        }
+
+    } catch {
+        Write-Host "Erro ao verificar sites arquivados: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
+function Verificar-MicrosoftFormsUpload {
+    param (
+        [ref]$relatorioAplicaveis,
+        [ref]$relatorioNaoAplicaveis
+    )
+
+    $relatorioAplicaveis.Value += [PSCustomObject]@{
+        Aplicativo     = "Microsoft Forms"
+        Limitacao      = "Forms com campo de upload de arquivos não funcionam após renomeação"
+        AcaoNecessaria = "Remover o botão de upload e adicioná-lo novamente após renomeação"
+        Impacto        = "Médio"
+    }
+
+    $relatorioNaoAplicaveis.Value += [PSCustomObject]@{
+        Aplicativo     = "Microsoft Forms"
+        Limitacao      = "Sem campo de upload detectado"
+        AcaoNecessaria = "Nenhuma"
+        Impacto        = "N/A"
+    }
+}
+
+function Verificar-OfficeAppsSalvamento {
+    param ([ref]$relatorioAplicaveis)
+
+    $relatorioAplicaveis.Value += [PSCustomObject]@{
+        Aplicativo     = "Aplicativos do Office (Word, Excel, PowerPoint)"
+        Limitacao      = "Durante a renomeação, usuários podem ter erro ao salvar arquivos hospedados"
+        AcaoNecessaria = "Tentar salvar novamente ou alterar URL"
+        Impacto        = "Médio"
+    }
+}
+
+function Verificar-OneDriveAcessoRapido {
+    param ([ref]$relatorioAplicaveis)
+
+    $relatorioAplicaveis.Value += [PSCustomObject]@{
+        Aplicativo     = "OneDrive / SharePoint - Acesso Rápido"
+        Limitacao      = "Links de Acesso Rápido não funcionam após renomeação"
+        AcaoNecessaria = "Usuário deve remover e recriar atalhos"
+        Impacto        = "Baixo"
+    }
+}
+
+function Verificar-OneDriveTeamsApp {
+    param ([ref]$relatorioAplicaveis)
+
+    $relatorioAplicaveis.Value += [PSCustomObject]@{
+        Aplicativo     = "OneDrive no Teams"
+        Limitacao      = "Erro 404 ao acessar OneDrive via Teams"
+        AcaoNecessaria = "Enviar arquivo no chat para forçar reconfiguração"
+        Impacto        = "Médio"
+    }
+}
+
+function Verificar-PowerPlatformConectoresSharePoint {
+    param (
+        [ref]$relatorioAplicaveis,
+        [ref]$relatorioNaoAplicaveis
+    )
+
+    try {
+        $ambientes = Get-AdminPowerAppEnvironment
+        $conectoresSP = @()
+
+        foreach ($amb in $ambientes) {
+            $conectores = Get-AdminPowerAppConnector -EnvironmentName $amb.EnvironmentName |
+                          Where-Object { $_.ConnectorName -like "*sharepoint*" }
+
+            if ($conectores) {
+                $conectoresSP += $conectores
+            }
+        }
+
+        if ($conectoresSP.Count -gt 0) {
+            $relatorioAplicaveis.Value += [PSCustomObject]@{
+                Aplicativo     = "Power Platform (Power Automate / Power BI)"
+                Limitacao      = "Detectadas conexões com SharePoint Online"
+                AcaoNecessaria = "Revisar fluxos e relatórios que usam URL antiga"
+                Impacto        = "Alto"
+            }
+        } else {
+            $relatorioNaoAplicaveis.Value += [PSCustomObject]@{
+                Aplicativo     = "Power Platform (Power Automate / Power BI)"
+                Limitacao      = "Nenhuma conexão com SharePoint detectada"
+                AcaoNecessaria = "Nenhuma"
+                Impacto        = "N/A"
+            }
+        }
+    } catch {
+        Write-Host "Erro ao verificar conectores Power Platform: $($_.Exception.Message)" -ForegroundColor Red
+
+        $relatorioAplicaveis.Value += [PSCustomObject]@{
+            Aplicativo     = "Power Platform"
+            Limitacao      = "Falha ao obter conectores (erro ou permissões)"
+            AcaoNecessaria = "Executar revisão manual nos conectores"
+            Impacto        = "Médio"
+        }
+    }
+}
+
+function Verificar-ProjectOnlineWorkflows {
+    param ([ref]$relatorioAplicaveis)
+
+    $relatorioAplicaveis.Value += [PSCustomObject]@{
+        Aplicativo     = "Project Online - Workflows"
+        Limitacao      = "Workflows 'em fuga' não são concluídos e não é possível iniciar novos."
+        AcaoNecessaria = "Verifique se todos os workflows foram concluídos antes da renomeação. Depois, republicar os fluxos."
+        Impacto        = "Alto"
+    }
+
+    $relatorioAplicaveis.Value += [PSCustomObject]@{
+        Aplicativo     = "Project Online - URLs em Workflows"
+        Limitacao      = "URLs fixas nos workflows não são atualizadas com a renomeação"
+        AcaoNecessaria = "Atualizar manualmente URLs em fluxos após renomeação"
+        Impacto        = "Médio"
+    }
+}
+
+function Verificar-ProjectOnlinePWA {
+    param ([ref]$relatorioAplicaveis)
+
+    $relatorioAplicaveis.Value += [PSCustomObject]@{
+        Aplicativo     = "Project Online - PWA"
+        Limitacao      = "Referências para https://project.microsoft.com deixam de funcionar"
+        AcaoNecessaria = "Atualizar as URLs em 'Meu site PWA' nas definições"
+        Impacto        = "Médio"
+    }
+}
+
+function Verificar-ProjectOnlineExcelRelatorios {
+    param ([ref]$relatorioAplicaveis)
+
+    $relatorioAplicaveis.Value += [PSCustomObject]@{
+        Aplicativo     = "Project Online - Relatórios Excel"
+        Limitacao      = "Relatórios com conexões de dados do SharePoint deixam de funcionar"
+        AcaoNecessaria = "Recriar conexões no Excel após a renomeação"
+        Impacto        = "Alto"
+    }
+}
+
+function Verificar-ProjectPro {
+    param ([ref]$relatorioAplicaveis)
+
+    $relatorioAplicaveis.Value += [PSCustomObject]@{
+        Aplicativo     = "Project Pro"
+        Limitacao      = "Project Pro só funciona com URL de PWA atualizada"
+        AcaoNecessaria = "Atualizar URL do site PWA nas configurações da conta"
+        Impacto        = "Médio"
+    }
+}
+
+
+function Verificar-SitesHubSharePoint {
+    param (
+        [ref]$relatorioAplicaveis,
+        [ref]$relatorioNaoAplicaveis
+    )
+
+    try {
+        $hubs = Get-SPOHubSite
+        if ($hubs.Count -gt 0) {
+            foreach ($hub in $hubs) {
+                $relatorioAplicaveis.Value += [PSCustomObject]@{
+                    Aplicativo     = "Site Hub SharePoint"
+                    Limitacao      = "Site Hub registrado: $($hub.SiteUrl)"
+                    AcaoNecessaria = "Cancelar registro e registrar novamente se necessário após renomeação"
+                    Impacto        = "Médio"
+                }
+            }
+        } else {
+            $relatorioNaoAplicaveis.Value += [PSCustomObject]@{
+                Aplicativo     = "Sites Hub SharePoint"
+                Limitacao      = "Nenhum site hub registrado"
+                AcaoNecessaria = "Nenhuma ação"
+                Impacto        = "N/A"
+            }
+        }
+    } catch {
+        Write-Host "Erro ao listar sites hub: $($_.Exception.Message)" -ForegroundColor Red
+        $relatorioAplicaveis.Value += [PSCustomObject]@{
+            Aplicativo     = "Sites Hub SharePoint"
+            Limitacao      = "Erro na verificação"
+            AcaoNecessaria = "Verificação manual recomendada"
+            Impacto        = "Alto"
+        }
+    }
+}
+
+function Verificar-SitesBloqueados {
+    param (
+        [ref]$relatorioAplicaveis,
+        [ref]$relatorioNaoAplicaveis
+    )
+
+    try {
+        $sitesBloqueados = Get-SPOSite -Limit All | Where-Object { $_.LockState -ne "Unlock" }
+
+        if ($sitesBloqueados.Count -gt 0) {
+            foreach ($site in $sitesBloqueados) {
+                $relatorioAplicaveis.Value += [PSCustomObject]@{
+                    Aplicativo     = "Sites Bloqueados SharePoint/OneDrive"
+                    Limitacao      = "Site bloqueado: $($site.Url) (LockState: $($site.LockState))"
+                    AcaoNecessaria = "Reveja o bloqueio e remova se apropriado antes da renomeação"
+                    Impacto        = "Alto"
+                }
+            }
+        } else {
+            $relatorioNaoAplicaveis.Value += [PSCustomObject]@{
+                Aplicativo     = "Sites Bloqueados SharePoint/OneDrive"
+                Limitacao      = "Nenhum site bloqueado detectado"
+                AcaoNecessaria = "Nenhuma ação necessária"
+                Impacto        = "N/A"
+            }
+        }
+    } catch {
+        Write-Host "Erro ao verificar sites bloqueados: $($_.Exception.Message)" -ForegroundColor Red
+        $relatorioAplicaveis.Value += [PSCustomObject]@{
+            Aplicativo     = "Sites Bloqueados SharePoint/OneDrive"
+            Limitacao      = "Falha na verificação"
+            AcaoNecessaria = "Verificação manual recomendada"
+            Impacto        = "Médio"
+        }
+    }
+}
+
 
 function Exibir-Relatorios {
     param($aplicaveis, $naoAplicaveis)

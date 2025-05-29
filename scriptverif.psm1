@@ -1,4 +1,4 @@
-﻿
+
 function Conectar-SharePoint {
     param([string]$adminUrl)
 
@@ -13,6 +13,36 @@ function Conectar-SharePoint {
     }
 }
 
+
+function Verificar-MultiGeo {
+    param([ref]$relatorioAplicaveis)
+    try {
+        Write-Host "Verificando configuração Multi-Geo no tenant..." -ForegroundColor Cyan
+        $tenantProps = Get-SPOTenant
+        if ($tenantProps.MultiGeoStatus -eq "Enabled") {
+            $relatorioAplicaveis.Value += [PSCustomObject]@{
+                Aplicativo        = "Configuração Multi-Geo"
+                Limitacao         = "Multi-Geo está habilitado"
+                AcaoNecessaria    = "Desativar o Multi-Geo para permitir renomeação"
+                Impacto           = "Alto"
+                DetalhesExtras    = "Renomeação de domínio não é suportada com Multi-Geo ativo."
+            }
+            Write-Host "Multi-Geo está habilitado no tenant." -ForegroundColor Yellow
+        } else {
+            Write-Host "Multi-Geo não está habilitado no tenant." -ForegroundColor Green
+        }
+    } catch {
+        Write-Host "Erro ao verificar configuração Multi-Geo: $($_.Exception.Message)" -ForegroundColor Red
+        $relatorioAplicaveis.Value += [PSCustomObject]@{
+            Aplicativo        = "Configuração Multi-Geo"
+            Limitacao         = "Falha na verificação"
+            AcaoNecessaria    = "Verificação manual recomendada"
+            Impacto           = "Médio"
+        }
+    }
+}
+
+
 function Verificar-LimitacoesTenant {
     param (
         [string]$tenant,
@@ -24,23 +54,6 @@ function Verificar-LimitacoesTenant {
     if (-not (Conectar-SharePoint -adminUrl $adminUrl)) { return }
 
     try {
-        # MultiGeo
-        if ((Get-SPOTenant).MultiGeo) {
-            $relatorioAplicaveis.Value += [PSCustomObject]@{
-                Aplicativo     = "Tenant MultiGeo"
-                Limitacao      = "Renomeação de domínio não suportada"
-                AcaoNecessaria = "Não é possível prosseguir com a renomeação"
-                Impacto        = "Alto"
-            }
-        } else {
-            $relatorioNaoAplicaveis.Value += [PSCustomObject]@{
-                Aplicativo     = "Tenant MultiGeo"
-                Limitacao      = "Renomeação suportada"
-                AcaoNecessaria = "Pode prosseguir com a renomeação"
-                Impacto        = "N/A"
-            }
-        }
-
             $status = Get-SPOTenantRenameStatus
         if ($status -and $status.State -eq "InProgress") {
             $agendamento = $status.'Requested at'
@@ -73,17 +86,6 @@ function Verificar-LimitacoesTenant {
             }
         }
 
-        # Sites excluídos
-        $excluidos = Get-SPODeletedSite
-        if ($excluidos) {
-            $relatorioAplicaveis.Value += [PSCustomObject]@{
-                Aplicativo     = "Sites Excluídos"
-                Limitacao      = "Não restauráveis após renomeação"
-                AcaoNecessaria = "Restaurar antes da mudança"
-                Impacto        = "Alto"
-            }
-        }
-
         # Redirect do OneDrive
         $redirect = (Get-SPOTenant).OneDriveURLRedirect
         if ($redirect -ne "Success") {
@@ -112,6 +114,36 @@ function Verificar-LimitacoesTenant {
         Write-Host "Erro ao coletar dados do tenant: $($_.Exception.Message)" -ForegroundColor Red
     }
 }
+
+function Verificar-SitesExcluidos {
+    param([ref]$relatorioAplicaveis)
+    try {
+        Write-Host "Verificando sites excluídos no tenant..." -ForegroundColor Cyan
+        $deletedSites = Get-SPODeletedSite
+        if ($deletedSites -and $deletedSites.Count -gt 0) {
+            $urls = ($deletedSites | Select-Object -ExpandProperty Url) -join "; "
+            $relatorioAplicaveis.Value += [PSCustomObject]@{
+                Aplicativo        = "Sites Excluídos"
+                Limitacao         = "Existem $($deletedSites.Count) sites excluídos"
+                AcaoNecessaria    = "Restaurar ou excluir permanentemente antes da renomeação"
+                Impacto           = "Alto"
+                DetalhesExtras    = $urls
+            }
+            Write-Host "Sites excluídos detectados: $urls" -ForegroundColor Yellow
+        } else {
+            Write-Host "Nenhum site excluído encontrado no tenant." -ForegroundColor Green
+        }
+    } catch {
+        Write-Host "Erro ao verificar sites excluídos: $($_.Exception.Message)" -ForegroundColor Red
+        $relatorioAplicaveis.Value += [PSCustomObject]@{
+            Aplicativo        = "Sites Excluídos"
+            Limitacao         = "Falha na verificação"
+            AcaoNecessaria    = "Verificação manual recomendada"
+            Impacto           = "Médio"
+        }
+    }
+}
+
 
 function Verificar-OneDriveSync {
     param([ref]$relatorioAplicaveis, [ref]$relatorioNaoAplicaveis)
@@ -607,6 +639,37 @@ function Verificar-SitesBloqueados {
     }
 }
 
+function Verificar-URLsAlternativos {
+    param([ref]$relatorioAplicaveis)
+
+    try {
+        Write-Host "Verificando domínios alternativos configurados no tenant..." -ForegroundColor Cyan
+        $tenantProps = Get-SPOTenant
+
+        if ($tenantProps.AlternateDomainNames -and $tenantProps.AlternateDomainNames.Count -gt 0) {
+            $detalhes = $tenantProps.AlternateDomainNames -join "; "
+            $relatorioAplicaveis.Value += [PSCustomObject]@{
+                Aplicativo        = "URLs Alternativos"
+                Limitacao         = "Domínios alternativos configurados"
+                AcaoNecessaria    = "Remover todos os domínios alternativos listados"
+                Impacto           = "Alto"
+                DetalhesExtras    = $detalhes
+            }
+            Write-Host "Domínios alternativos detectados: $detalhes" -ForegroundColor Yellow
+        } else {
+            Write-Host "Nenhum domínio alternativo configurado no tenant." -ForegroundColor Green
+        }
+    } catch {
+        Write-Host "Erro ao verificar URLs alternativos: $($_.Exception.Message)" -ForegroundColor Red
+        $relatorioAplicaveis.Value += [PSCustomObject]@{
+            Aplicativo        = "URLs Alternativos"
+            Limitacao         = "Falha na verificação"
+            AcaoNecessaria    = "Verificação manual recomendada"
+            Impacto           = "Médio"
+        }
+    }
+}
+
 
 function Exibir-Relatorios {
     param($aplicaveis, $naoAplicaveis)
@@ -617,3 +680,4 @@ function Exibir-Relatorios {
     Write-Host "`nResumo das limitações identificadas (Não Aplicáveis):" -ForegroundColor Cyan
     $naoAplicaveis | Format-Table -AutoSize
 }
+
